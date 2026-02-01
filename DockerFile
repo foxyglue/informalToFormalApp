@@ -1,0 +1,69 @@
+########################################
+# BASE IMAGE
+########################################
+FROM python:3.10-slim
+
+########################################
+# ENVIRONMENT SETUP
+########################################
+# Prevent Python from buffering stdout/stderr
+ENV PYTHONUNBUFFERED=1
+
+# Working directory in container
+WORKDIR /app
+
+########################################
+# INSTALL SYSTEM DEPENDENCIES
+########################################
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+########################################
+# COPY BACKEND FILES
+########################################
+COPY requirements.txt .
+
+# Install Python libraries
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the backend code
+COPY . .
+
+########################################
+# BUILD THE FRONTEND
+########################################
+# Set working directory into frontend
+WORKDIR /app/frontend
+
+# Install Node + npm (needed to build frontend)
+# Using Node 18
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y nodejs
+
+# Install frontend dependencies
+RUN npm install
+
+# Build the React app
+RUN npm run build
+
+########################################
+# MOVE DIST INTO ROOT
+########################################
+RUN mv /app/frontend/dist /app/frontend_build
+
+########################################
+# FINAL SETUP
+########################################
+# Back to project root
+WORKDIR /app
+
+# Expose the port used by FastAPI
+EXPOSE 7860
+
+########################################
+# START THE API USING UVICORN
+########################################
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
