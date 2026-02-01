@@ -1,0 +1,2 @@
+# informalToFormalApp
+buat skripsi coy
