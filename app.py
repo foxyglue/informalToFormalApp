@@ -1,5 +1,8 @@
+from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
@@ -145,3 +148,26 @@ def health_check():
         "model_loaded": model is not None,
         "tokenizer_loaded": tokenizer is not None
     }
+    
+# SERVE FRONTEND STATIC FILES IN HUGFACE SPACES
+frontend_path = Path("/app/frontend_build")
+
+if frontend_path.exists():
+    app.mount("/assets", StaticFiles(directory="/app/frontend_build/assets"), name="assets")
+    
+    @app.get("/", response_class=FileResponse)
+    async def serve_frontend():
+        return FileResponse("/app/frontend_build/index.html")
+    
+    @app.get("/{full_path:path}", response_class=FileResponse)
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API endpoint not found")
+        
+        file_path = frontend_path / full_path
+        if file_path.exists() and file_path.is_file():
+            return FileResponse(file_path)
+        
+        return FileResponse("/app/frontend_build/index.html")
+else:
+    logger.warning("Frontend build not found. Only API endpoints will be available.")
