@@ -1,37 +1,147 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
+from peft import PeftModel
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Nama model yang sudah diupload ke Hugging Face
-MODEL_NAME = "my-username/indo-formalizer"  # ganti dengan HF repo kamu
+MODEL_NAME = "foxyglue/cendol-mt5-base-inst-indonesian-formality" 
+BASE_MODEL_NAME = "indonlp/cendol-mt5-base-inst"
 
 app = FastAPI()
 
-print("Loading model...")
+# CORS middleware - allow all origins for Hugging Face Spaces
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME)
-model.eval()
+# Global variables for model and tokenizer
+tokenizer = None
+model = None
 
-print("Model loaded successfully!")
+@app.on_event("startup")
+async def load_model():
+    """Load model on startup"""
+    global tokenizer, model
+    
+    try:
+        logger.info("Loading tokenizer...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        
+        logger.info("Loading base model...")
+        base_model = AutoModelForSeq2SeqLM.from_pretrained(
+            BASE_MODEL_NAME,
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=True
+        )
+        
+        logger.info("Loading PEFT adapter...")
+        model = PeftModel.from_pretrained(base_model, MODEL_NAME)
+        model.eval()
+        
+        logger.info("Model loaded successfully!")
+        
+    except Exception as e:
+        logger.error(f"Error loading model: {str(e)}")
+        raise
 
 class PredictionRequest(BaseModel):
     text: str
+    
+    class Config:
+        schema_extra = {
+            "example": {
+                "text": "gw udh coba berkali2 tp tetep gabisa min"
+            }
+        }
 
-@app.post("/api/predict")
-def predict(req: PredictionRequest):
-    # Tokenize input
-    inputs = tokenizer(req.text, return_tensors="pt", truncation=True, max_length=512)
+class PredictionResponse(BaseModel):
+    input: str
+    output: str
 
-    # Generate output
-    with torch.no_grad():
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=128,
-            num_beams=4,
+@app.get("/")
+def read_root():
+    """Health check endpoint"""
+    return {
+        "status": "ok",
+        "message": "Indonesian Formality Transfer API is running",
+        "model": MODEL_NAME
+    }
+
+@app.post("/api/predict", response_model=PredictionResponse)
+async def predict(req: PredictionRequest):
+    """
+    Convert informal Indonesian text to formal Indonesian
+    
+    - **text**: Informal Indonesian text to be formalized
+    """
+    if not req.text or not req.text.strip():
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    
+    try:
+        # Inference prompt (without placeholder instruction)
+        prompt = f"""Instruction: 
+Anda akan diberikan sebuah kalimat Informal dalam bahasa Indonesia, dan tugas Anda adalah mengubahnya menjadi kalimat Formal dengan tetap menjaga makna asli. Perhatikan bahwa: 
+- Output harus berupa satu kalimat utuh dalam bahasa Indonesia yang formal dan sesuai konteks
+- Pastikan adanya huruf kapital pada awal kalimat dan setelah tanda titik (.), tanda seru (!) dan tanda tanya (?), serta nama orang, organisasi, gelar dan jabatan
+- Perbaiki penggunaan tanda baca, seperti penambahan titik pada akhir kalimat dan tanda koma untuk anak kalimat
+- Ubah kata yang tidak baku menjadi baku sesuai dengan KBBI, seperti kata yang disingkat (contoh: knp → kenapa) dan imbuhan (contoh: dia nulis resep → dia menulis resep)
+- Perbaiki posisi kata dalam kalimat, seperti subjek diikuti dengan predikat dan objek serta keterangan jika ada (contoh: mesin ini rusak kenapa? → mengapa mesin ini rusak?)
+- Jika ditemukan istilah asing, tambahkan "*" pada awal dan akhir kata (contoh: software → *software*)
+- Hapus emoji dan hashtag bila ditemukan
+
+Informal : {req.text}
+Formal :"""
+        
+        # Tokenize input
+        inputs = tokenizer(
+            prompt, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=512
         )
+        
+        # Generate output
+        with torch.no_grad():
+            generated_ids = model.generate(
+                **inputs,
+                max_new_tokens=512,
+                num_beams=4,
+                do_sample=False,
+                early_stopping=True
+            )
+        
+        # Decode output
+        result = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+        
+        # Extract only the formal part (after "Formal :")
+        if "Formal :" in result:
+            result = result.split("Formal :")[-1].strip()
+        
+        return PredictionResponse(
+            input=req.text,
+            output=result
+        )
+        
+    except Exception as e:
+        logger.error(f"Error during prediction: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
 
-    # Decode output
-    result = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-    return {"output": result}
+@app.get("/health")
+def health_check():
+    """Detailed health check"""
+    return {
+        "status": "healthy",
+        "model_loaded": model is not None,
+        "tokenizer_loaded": tokenizer is not None
+    }

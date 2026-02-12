@@ -4,3 +4,5 @@ torch
 transformers
 sentencepiece
 python-multipart
+peft
+pydantic
